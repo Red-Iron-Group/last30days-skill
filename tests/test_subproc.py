@@ -5,6 +5,7 @@ PID callback wiring, and environment inheritance.
 """
 
 import builtins
+import errno
 import os as real_os
 import platform
 import unittest
@@ -35,9 +36,27 @@ def get_shell_cmd(cmd_str: str) -> list[str]:
     return ["sh", "-c", cmd_str]
 
 
+class TestSubprocTimeout(unittest.TestCase):
+    def test_exception_class_raises_without_a_message(self):
+        with self.assertRaises(subproc.SubprocTimeout) as caught:
+            raise subproc.SubprocTimeout
+        self.assertEqual(str(caught.exception), "")
+        self.assertTrue(caught.exception.started)
+
+
 class TestRunWithTimeout(unittest.TestCase):
     def setUp(self):
         self.addCleanup(setattr, subproc, "_shutting_down", False)
+
+    def test_spawn_errors_preserve_original_type_and_errno(self):
+        for error_number in (errno.ENOENT, errno.EAGAIN, errno.EMFILE):
+            error = OSError(error_number, "command could not start")
+            with self.subTest(error_number=error_number), \
+                 patch.object(subproc.subprocess, "Popen", side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    subproc.run_with_timeout(["missing-command"], timeout=1)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(caught.exception.errno, error_number)
 
     def test_success_returns_stdout(self):
         result = subproc.run_with_timeout(
@@ -405,8 +424,9 @@ time.sleep(15)
             def __init__(self):
                 self.pid = 4321
                 self.kill_count = 0
+                self.stdin = self.stdout = self.stderr = None
 
-            def communicate(self, timeout=None):
+            def communicate(self, timeout=None, input=None):
                 raise TimeoutExpired(cmd="x", timeout=timeout)
 
             def wait(self, timeout=None):

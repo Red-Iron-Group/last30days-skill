@@ -226,7 +226,7 @@ def _post_audio(provider: str, path: str, api_key: str, timeout: float) -> Optio
         method="POST",
     )
     usage.begin(provider)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with http.open_request(req, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return data.get("text")
 
