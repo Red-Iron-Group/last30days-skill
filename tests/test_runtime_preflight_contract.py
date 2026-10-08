@@ -9,13 +9,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.skill_contract import contract_documents, reference_text, root_text
+
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_MD = ROOT / "skills" / "last30days" / "SKILL.md"
 
 
 class RuntimePreflightContractTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.skill_md = SKILL_MD.read_text(encoding="utf-8")
+        self.skill_md = reference_text("runtime")
 
     def test_windows_localappdata_python_install_dir_is_scanned_first(self) -> None:
         scan_command = 'find "$windows_python_root" -maxdepth 2 -type f -iname python.exe'
@@ -41,8 +43,9 @@ class RuntimePreflightContractTests(unittest.TestCase):
         # Claude Code replaces $<digit> in a skill body with words from the
         # invocation arguments before the model reads it (anthropics/claude-code#94709),
         # so shell/awk code in SKILL.md spells positional parameters as ${1} / $(2).
-        fenced = re.findall(r"```.*?```", self.skill_md, re.S)
-        inline = re.findall(r"`[^`\n]+`", re.sub(r"```.*?```", "", self.skill_md, flags=re.S))
+        text = "\n".join(contract_documents().values())
+        fenced = re.findall(r"```.*?```", text, re.S)
+        inline = re.findall(r"`[^`\n]+`", re.sub(r"```.*?```", "", text, flags=re.S))
         hits = [m.group(0) for block in fenced + inline for m in re.finditer(r"\$\d+(?![A-Za-z0-9_])", block)]
         self.assertEqual(hits, [])
 
@@ -50,7 +53,7 @@ class RuntimePreflightContractTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which("bash") and shutil.which("awk"), "requires bash and awk")
 class RuntimePreflightExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.skill_md = SKILL_MD.read_text(encoding="utf-8")
+        self.skill_md = reference_text("runtime")
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -92,11 +95,11 @@ class RuntimePreflightExecutionTests(unittest.TestCase):
         candidate.chmod(0o755)
         return candidate
 
-    def _run(self, source: str) -> subprocess.CompletedProcess[str]:
+    def _run(self, source: str, *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [shutil.which("bash"), "--noprofile", "--norc", "-c", self._substitute_arguments(source)],
             env=self.env,
-            cwd=self.root,
+            cwd=cwd or self.root,
             capture_output=True,
             text=True,
             timeout=15,
@@ -105,7 +108,10 @@ class RuntimePreflightExecutionTests(unittest.TestCase):
     def _run_preflight(self) -> subprocess.CompletedProcess[str]:
         snippet = re.search(r"```bash\n(try_last30days_python\(\).*?)\n```", self.skill_md, re.S)
         self.assertIsNotNone(snippet)
-        return self._run(snippet[1] + '\nprintf "Selected: <%s>\\n" "$LAST30DAYS_PYTHON"')
+        resolution = re.search(r"## Save-directory resolution.*?```bash\n(.*?)\n```", self.skill_md, re.S)
+        self.assertIsNotNone(resolution)
+        self.assertLess(snippet.start(), resolution.start())
+        return self._run(snippet[1] + "\n" + resolution[1] + '\nprintf "Selected: <%s>\\n" "$LAST30DAYS_PYTHON"')
 
     def test_missing_python_stops_before_engine(self) -> None:
         result = self._run_preflight()
@@ -126,7 +132,10 @@ class RuntimePreflightExecutionTests(unittest.TestCase):
         self._python_candidate("python3.12", (3, 12))
         result = self._run_preflight()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "Selected: <python3.13>\n")
+        self.assertEqual(
+            result.stdout,
+            f"LAST30DAYS_PYTHON={self.bin / 'python3.13'}\nSelected: <{self.bin / 'python3.13'}>\n",
+        )
         self.assertIn(f"Resolved save directory: <{self.save_dir}>", result.stderr)
 
     def test_explicit_python_path_with_spaces_is_preserved(self) -> None:
@@ -134,8 +143,39 @@ class RuntimePreflightExecutionTests(unittest.TestCase):
         self.env["LAST30DAYS_PYTHON"] = str(candidate)
         result = self._run_preflight()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"Selected: <{candidate}>\n")
+        self.assertEqual(
+            result.stdout,
+            f"LAST30DAYS_PYTHON={shlex.quote(str(candidate))}\nSelected: <{candidate}>\n",
+        )
         self.assertIn(f"Resolved save directory: <{self.save_dir}>", result.stderr)
+
+    def test_selected_python_runs_welcome_in_a_separate_shell(self) -> None:
+        candidate = self._python_candidate("supported python", (3, 12))
+        self.env["LAST30DAYS_PYTHON"] = f"./bin/{candidate.name}"
+        preflight = self._run_preflight()
+        self.assertEqual(preflight.returncode, 0, preflight.stderr)
+        assignment = next(
+            (line for line in preflight.stdout.splitlines() if line.startswith("LAST30DAYS_PYTHON=")),
+            None,
+        )
+        self.assertIsNotNone(assignment, "preflight must print a reusable shell assignment")
+        self.assertEqual(assignment, f"LAST30DAYS_PYTHON={shlex.quote(str(candidate))}")
+
+        installed = self.root / "welcome skill"
+        (installed / "scripts").mkdir(parents=True)
+        (installed / "scripts" / "last30days.py").write_text('print("welcome")\n', encoding="utf-8")
+        self.env.pop("LAST30DAYS_PYTHON")
+        self.env["SKILL_DIR"] = str(installed)
+        welcome = re.search(
+            r"\*\*1\. Welcome\.\*\* Run `([^`]+--welcome)`",
+            reference_text("setup-wizard"),
+        )
+        self.assertIsNotNone(welcome)
+        later_cwd = self.root / "later shell"
+        later_cwd.mkdir()
+        result = self._run(assignment + "\n" + welcome[1], cwd=later_cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "welcome\n")
 
     def test_invalid_explicit_python_does_not_fall_back(self) -> None:
         self._python_candidate("python3.12", (3, 12))
@@ -157,11 +197,14 @@ class RuntimePreflightExecutionTests(unittest.TestCase):
         self.env["LOCALAPPDATA"] = str(local_appdata)
         result = self._run_preflight()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"Selected: <{candidate}>\n")
+        self.assertEqual(
+            result.stdout,
+            f"LAST30DAYS_PYTHON={shlex.quote(str(candidate))}\nSelected: <{candidate}>\n",
+        )
         self.assertIn(f"Resolved save directory: <{self.save_dir}>", result.stderr)
 
     def test_badge_version_awk_fallback_survives_argument_substitution(self) -> None:
-        command = re.search(r"`(jq -r '\.version'.*?)`", self.skill_md)
+        command = re.search(r"`(jq -r '\.version'.*?)`", root_text())
         self.assertIsNotNone(command)
         installed_skill = self.root / "badge skill"
         installed_skill.mkdir()

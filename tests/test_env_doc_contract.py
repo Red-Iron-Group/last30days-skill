@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from lib import env
+from tests.skill_contract import contract_documents
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,10 @@ DOC_ONLY_KEYS = {
     "LAST30DAYS_CONFIG_DIR",
     "LAST30DAYS_PASS_PREFIX",
     "LAST30DAYS_SKIP_KEYCHAIN",
+    # LAW 7 host-plan gate: process environment only, so a .env line can
+    # neither make a cron run look agent-hosted nor silently lift the gate.
+    "LAST30DAYS_ALLOW_ENGINE_PLAN",
+    "LAST30DAYS_HOST_AGENT",
 }
 
 
@@ -52,6 +57,8 @@ def _documented_env_keys() -> set[str]:
     keys: set[str] = set()
     for path in DOC_PATHS:
         keys.update(CONFIG_ENV_KEY_RE.findall(path.read_text(encoding="utf-8")))
+    for text in contract_documents().values():
+        keys.update(CONFIG_ENV_KEY_RE.findall(text))
     return keys
 
 
