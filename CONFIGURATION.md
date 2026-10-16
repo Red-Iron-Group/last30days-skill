@@ -103,9 +103,17 @@ These variables configure the local Go MCP server and are read from its process 
 
 | Env var | Default | Accepted values | Behavior and precedence |
 |---|---|---|---|
-| `LAST30DAYS_PYTHON` | unset | An executable name or path | Selects the Python 3.12+ interpreter used by the MCP server. A caller-supplied `RunOptions.PythonPath` remains the test/caller override; otherwise this variable must resolve to an executable. When it is unset, the server looks up `python3` on `PATH`. An empty or unresolvable value is an error rather than a fallback. |
+| `LAST30DAYS_PYTHON` | unset | An executable name or path | Selects the Python 3.12+ interpreter used by the MCP server. A caller-supplied `RunOptions.PythonPath` remains the test/caller override; otherwise this variable must resolve to an executable. When it is unset, the server discovers and version-probes compatible Python executables in absolute `PATH` directories. An empty or unresolvable value is an error rather than a fallback. |
 | `LAST30DAYS_MCP_ALLOW_BROWSER_COOKIES` | unset (deny) | `1`, `true`, `yes`, or `on`, case-insensitive | A recognized truthy value removes the MCP layer's default `--no-browser-cookies` flag. Every other value keeps that denial. This switch grants no consent by itself: browser-cookie access still requires the engine's separately recorded consent and `FROM_BROWSER` configuration. |
 | `LAST30DAYS_MCP_TIMEOUT` | `600` seconds (10 minutes) | A positive Go duration such as `10m`, `90s`, or `1m30s`, or a positive integer number of seconds such as `600` | Caps each research subprocess. The default accommodates deep discovery enrichment. Invalid, zero, and negative values use the default. An explicit caller timeout takes precedence. Source and enrichment deadlines can finish earlier; increasing this cap also extends how long a hung subprocess can occupy an MCP slot. |
+
+### MCP Python interpreter
+
+The MCP server requires Python 3.12 or newer within Python 3. It checks executable candidates in absolute `PATH` directories, in directory order: `python3`, versioned `python3.N` names from newest to oldest, then `python`. Windows `.exe` names are supported. Each candidate is version-probed before research starts; an old or unusable default does not hide a compatible interpreter later on `PATH`. Relative and empty `PATH` entries are ignored.
+
+Set `LAST30DAYS_PYTHON` in the MCP server process environment to pin a compatible executable, including one outside `PATH`, for example `/absolute/path/to/python3.12`. It accepts an absolute path or a command name resolving through `PATH` to an absolute executable. A missing, old, or invalid explicit choice produces an error without automatic fallback. This variable is read by the Go launcher, so setting it only in the Python engine's `.env` file cannot select the launcher interpreter.
+
+Discovery has a five-second total budget and a two-second limit per version probe. The research timeout is separate. Embedded Go callers retain the trusted `RunOptions.PythonPath` override for custom interpreters and test doubles. This selection does not add Python 3.9 support or install Python automatically.
 
 ## API keys (`.env`)
 
@@ -257,6 +265,12 @@ CT0=<your-ct0-token>
 # X_BEARER_TOKEN=<your-x-api-bearer-token>
 # OR xAI API key (paid)
 # XAI_API_KEY=<your-xai-key>
+# Optional: pin the xAI model (default: grok-4.20-0309-non-reasoning).
+# Set this if your key's model permissions don't include the default, or to
+# select a different available model from console.x.ai. It covers X search
+# only; the xAI planner and rerank models share the same default and are
+# pinned with LAST30DAYS_PLANNER_MODEL / LAST30DAYS_RERANK_MODEL.
+# LAST30DAYS_X_MODEL=grok-4.20-0309-non-reasoning
 # OR Xquik key-based X search
 # XQUIK_API_KEY=<your-xquik-key>
 # OR cookie-jar (free; logs in via your browser session).
